@@ -1,28 +1,34 @@
 <?php
+session_start();
 include "../includes/db.php";
 
-$email = trim($_POST['email']);
-$code  = rand(100000, 999999);
-$expires = date("Y-m-d H:i:s", time() + 600);
+// Get email from session
+$email = $_SESSION['login_email'] ?? '';
 
-// check if user exists
-$checkUser = mysqli_query($conn, "SELECT id FROM users WHERE email='$email'");
-if (mysqli_num_rows($checkUser) == 0) {
-    die("No account found");
+if (empty($email)) {
+    header("Location: login.php");
+    exit();
 }
 
-// remove old login codes
+// Generate 6-digit code
+$code = sprintf("%06d", mt_rand(0, 999999));
+
+// Store in database with UTC time
+$expires_utc = gmdate("Y-m-d H:i:s", strtotime("+10 minutes"));
+
+// Clear any existing codes
 mysqli_query($conn, "DELETE FROM email_verifications WHERE email='$email'");
 
-mysqli_query($conn, "
-    INSERT INTO email_verifications (email, code, expires_at)
-    VALUES ('$email', '$code', '$expires')
-");
+// Insert new code
+$sql = "INSERT INTO email_verifications (email, code, expires_at) VALUES ('$email', '$code', '$expires_utc')";
+mysqli_query($conn, $sql);
 
-echo "DEV LOGIN CODE: $code";
+// Store in session
+$_SESSION['login_verification_code'] = $code;
+$_SESSION['code_generated_at'] = time();
+$_SESSION['resend_allowed_after'] = time() + 60;
 
-echo "<form action='verify_login.php' method='POST'>
-        <input type='hidden' name='email' value='$email'>
-        <input type='text' name='code' placeholder='Enter code' required>
-        <button>Login</button>
-      </form>";
+// Redirect to verification page
+header("Location: verify_login.php");
+exit();
+?>

@@ -1,759 +1,954 @@
-<?php 
-include "../partials/navbar.php";
-include "../auth/auth_check.php";
-include "../includes/db.php";
+<?php
+// Enable error reporting
+ini_set('display_errors', 1);
+ini_set('display_startup_errors', 1);
+error_reporting(E_ALL);
 
-$res = mysqli_query($conn, "SELECT * FROM restaurants");
+session_start();
+
+// Include database
+require_once "../includes/db.php";
+
+// Check if user is logged in
+if (!isset($_SESSION['user_id'])) {
+    header("Location: ../auth/login.php");
+    exit();
+}
+
+// Get search/filter parameters
+$search = $_GET['search'] ?? '';
+$category = $_GET['category'] ?? '';
+$delivery_type = $_GET['delivery'] ?? '';
+$sort = $_GET['sort'] ?? 'default';
+$page = isset($_GET['page']) ? (int)$_GET['page'] : 1;
+$limit = 20; // Items per page
+$offset = ($page - 1) * $limit;
+
+// Build query
+$where_conditions = ["m.status IN ('active', 'setup')"];
+$params = [];
+$param_types = "";
+
+if (!empty($search)) {
+    $where_conditions[] = "(m.store_name LIKE ? OR m.brand_name LIKE ? OR md.cuisine_types LIKE ? OR sc.name LIKE ?)";
+    $search_term = "%" . $search . "%";
+    array_push($params, $search_term, $search_term, $search_term, $search_term);
+    $param_types .= "ssss";
+}
+
+if (!empty($category) && $category != 'all') {
+    $where_conditions[] = "sc.name = ?";
+    $params[] = $category;
+    $param_types .= "s";
+}
+
+if (!empty($delivery_type)) {
+    if ($delivery_type == 'delivery') {
+        $where_conditions[] = "ds.is_delivery_available = 1";
+    } elseif ($delivery_type == 'pickup') {
+        $where_conditions[] = "ds.is_pickup_available = 1";
+    }
+}
+
+$where_clause = !empty($where_conditions) ? "WHERE " . implode(" AND ", $where_conditions) : "";
+
+// Order by
+$order_by = "ORDER BY ";
+switch ($sort) {
+    case 'rating': 
+        $order_by .= "m.rating DESC, m.review_count DESC"; 
+        break;
+    case 'delivery_time': 
+        $order_by .= "ds.estimated_delivery_time ASC"; 
+        break;
+    case 'name': 
+        $order_by .= "m.store_name ASC"; 
+        break;
+    case 'featured': 
+        $order_by .= "m.is_featured DESC, m.created_at DESC"; 
+        break;
+    default: 
+        $order_by .= "m.created_at DESC"; 
+        break;
+}
+
+// Get total count for pagination
+$count_sql = "SELECT COUNT(DISTINCT m.merchant_id) as total 
+              FROM merchants m
+              LEFT JOIN merchant_details md ON m.merchant_id = md.merchant_id
+              LEFT JOIN delivery_settings ds ON m.merchant_id = ds.merchant_id
+              LEFT JOIN store_categories sc ON m.category_id = sc.category_id
+              $where_clause";
+              
+$stmt = mysqli_prepare($conn, $count_sql);
+if (!empty($params)) {
+    mysqli_stmt_bind_param($stmt, $param_types, ...$params);
+}
+mysqli_stmt_execute($stmt);
+$count_result = mysqli_stmt_get_result($stmt);
+$total_count = mysqli_fetch_assoc($count_result)['total'];
+$total_pages = ceil($total_count / $limit);
+
+// Get stores with all details including store images
+$stores_sql = "SELECT 
+                m.merchant_id,
+                m.store_name,
+                m.store_address,
+                m.featured_image,
+                m.store_type,
+                m.is_featured,
+                m.rating,
+                m.review_count,
+                sc.name as category_name,
+                sc.icon as category_icon,
+                md.cuisine_types,
+                md.store_phone,
+                ds.delivery_fee,
+                ds.estimated_delivery_time,
+                ds.is_delivery_available,
+                ds.is_pickup_available,
+                ds.min_order_amount,
+                (SELECT COUNT(*) FROM menu_items mi WHERE mi.merchant_id = m.merchant_id) as menu_item_count,
+                (SELECT si.image_path FROM store_images si WHERE si.merchant_id = m.merchant_id ORDER BY si.display_order LIMIT 1) as store_image_path
+              FROM merchants m
+              LEFT JOIN merchant_details md ON m.merchant_id = md.merchant_id
+              LEFT JOIN delivery_settings ds ON m.merchant_id = ds.merchant_id
+              LEFT JOIN store_categories sc ON m.category_id = sc.category_id
+              $where_clause
+              $order_by
+              LIMIT ? OFFSET ?";
+              
+$params[] = $limit;
+$params[] = $offset;
+$param_types .= "ii";
+
+$stmt = mysqli_prepare($conn, $stores_sql);
+if (!empty($params)) {
+    mysqli_stmt_bind_param($stmt, $param_types, ...$params);
+}
+mysqli_stmt_execute($stmt);
+$stores_result = mysqli_stmt_get_result($stmt);
+
+// Get all categories for filter
+$categories_sql = "SELECT * FROM store_categories WHERE is_active = 1 ORDER BY name";
+$categories_result = mysqli_query($conn, $categories_sql);
 ?>
-
-
-
-
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Food Delivery — Mock</title>
-<style>
-  :root{
-    --sidebar-w: 220px;
-    --accent: #00b26a;
-    --muted:#8b8b8b;
-    --card-bg:#fff;
-    --page-bg:#fafafa;
-    --radius:12px;
-    --gap:20px;
-  }
-  *{box-sizing:border-box}
-  body{
-    margin:0;
-    font-family: "Helvetica Neue", Arial, sans-serif;
-    background:var(--page-bg);
-    color:#111;
-  }
-
-  /* LAYOUT */
-  .app{
-    display:flex;
-    min-height:100vh;
-  }
-
-  /* SIDEBAR */
-  .sidebar{
-    margin-top: 25px;
-    width:var(--sidebar-w);
-    background:#fff;
-    border-right:1px solid #e6e6e6;
-    padding:20px 14px;
-    position:fixed;
-    top:0; left:0; bottom:0;
-    overflow:auto;
-  }
-  .brand{
-    display:flex;
-    align-items:center;
-    gap:10px;
-    margin-bottom:18px;
-  }
-  
- a{
-    text-decoration: none;
-    color: black;
- }
-
-  .side-list{list-style:none;padding:0;margin-top:6px}
-  .side-list li{
-    display:flex;align-items:center;gap:10px;
-    padding:10px 8px;border-radius:8px;color:#222;font-size:15px;cursor:pointer;
-  }
-  .side-list li:hover{background:#f5f5f5}
-  .side-list li .ico{width:28px;height:28px;border-radius:8px;background:#f0f0f0;display:inline-flex;align-items:center;justify-content:center}
-
-  /* MAIN */
-  .main{
-    margin-top: 25px;
-    margin-left:var(--sidebar-w);
-    flex:1;
-    padding:22px 28px;
-    min-width:0;
-  }
-
-  /* NAVBAR */
-  .topbar{
-    background: #fff;
-    position:fixed;
-    top:0; left:0; right: 0;
-    display:flex;
-    align-items:center;
-    gap:18px;
-    margin-bottom:18px;
-    padding-bottom: 10px;
-    border-bottom: #111;
-    
-  }
-  .hamburger{margin-left: 10px; width:36px;height:36px;border-radius:8px;background:#fff;border:1px solid #e6e6e6;display:flex;align-items:center;justify-content:center;cursor:pointer}
-  .logo-sm{font-weight:700;font-size:18px}
-  .switch{
-    display:inline-flex;border-radius:999px;overflow:hidden;border:1px solid #e6e6e6;
-  }
-  .switch button{
-    padding:8px 14px;border:0;background:transparent;cursor:pointer;font-size:14px;
-  }
-  .switch .active{background:#111;color:#fff}
-
-  .location{
-    padding:8px 12px;border-radius:20px;background:#fff;border:1px solid #eee;font-size:14px;
-    display:flex;align-items:center;gap:8px;
-  }
-
-  .search{
-    margin-left:10px;flex:1;display:flex;align-items:center;
-  }
-  .search input{
-    width:100%;padding:12px 16px;border-radius:30px;border:1px solid #e6e6e6;background:#fff;font-size:15px;
-  }
-
-  .actions{display:flex;gap:10px;align-items:center;margin-left:auto}
-  .actions .btn{padding:8px 12px;border-radius:20px;border:1px solid #111;background:green;cursor:pointer}
-  .actions .cart{display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:20px;background:green;border:1px solid #e6e6e6}
-
-  .actions :hover {
-    cursor: pointer;
-  }
-  /* CATEGORY STRIP */
-  .categories{
-    display:flex;gap:18px;align-items:center;padding:16px 0;overflow:auto;
-    border-bottom:1px solid #f0f0f0;margin-bottom:18px;
-  }
-  .cat{
-    min-width:92px;text-align:center;font-size:13px;color:#222;cursor:pointer;
-  }
-  .cat .circle{
-    width:64px;height:64px;border-radius:50%;background:#fff;border:1px solid #eee;display:flex;align-items:center;justify-content:center;margin:0 auto 8px;font-size:28px;
-    box-shadow:0 1px 2px rgba(0,0,0,0.04)
-  }
-
-  .cart {
-    color: green;
-  }
-  /* HERO (two-column) */
-  .hero{
-    display:grid;grid-template-columns:1fr 340px;gap:20px;align-items:start;margin-top:8px;
-  }
-  .hero-left{
-    background:transparent;padding:6px 2px;
-  }
-  .kicker{color:var(--muted);font-size:14px;margin-bottom:6px}
-  .hero h2{
-    font-size:44px;margin:6px 0 12px;line-height:1;
-  }
-  .hero p{color:var(--muted);margin-bottom:18px}
-
-  .promo{
-    background:var(--accent);color:white;border-radius:14px;padding:18px;display:flex;flex-direction:column;gap:12px;align-items:flex-start;
-    min-height:120px;
-  }
-  .promo small{opacity:0.95}
-  .promo .cta{background:#fff;color:var(--accent);padding:8px 12px;border-radius:999px;border:none;cursor:pointer;font-weight:600}
-
-  /* SECTION (rows) */
-  .section{
-    margin-top:26px;
-  }
-  .section .header{
-    display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;
-  }
-  .section h3{margin:0;font-size:20px}
-  .seeall{display:flex;gap:12px;align-items:center;color:var(--muted);font-size:13px}
-
-  /* HORIZONTAL CAROUSEL */
-  .row{
-    display:flex;gap:14px;overflow:auto;padding-bottom:8px;
-  }
-
-  .card{
-    width:360px;flex:0 0 360px;background:var(--card-bg);border-radius:12px;border:1px solid #eee;overflow:visible;
-    box-shadow:0 6px 18px rgba(10,10,10,0.04);
-  }
-  .card .img{
-    height:140px;background-size:cover;background-position:center;
-  }
-  .badge{
-    position:static;left:0px;top:0px;background:#e22;color:#fff;padding:6px 10px;width: 220px; border-radius:999px;font-size:13px;font-weight:700;box-shadow:0 6px 12px rgba(0,0,0,0.12)
-  }
-  .card .meta{padding:12px 14px}
-  .card .meta h4{margin:0 0 6px;font-size:16px}
-  .card .meta .sub{color:var(--muted);font-size:13px}
-
-  /* SMALL CARD (for smaller cards like stores circle) */
-  .small{
-    width:220px;flex:0 0 220px;background:#fff;border-radius:12px;border:1px solid #eee;padding:12px;display:flex;gap:12px;align-items:center
-  }
-  .small .logo{width:64px;height:64px;border-radius:50%;background:#f2f2f2;display:flex;align-items:center;justify-content:center;font-weight:700}
-
-  /* circular store list */
-  .store-list{display:flex;gap:16px;align-items:center;overflow:auto;padding:8px 0; margin-left: 1px;}
-  .store{
-    width:88px;flex:0 0 88px;text-align:center;font-size:13px;color:#333; padding-left: 10px;
-  }
-  .store .slogo{margin-left: 20px; width:80px;height:80px;border-radius:50%;border:6px solid #fff;box-shadow:0 2px 8px rgba(0,0,0,0.06);display:flex;align-items:center;justify-content:center; padding: 45px; background:#e9f7f1;margin:0 auto 6px}
-
-
-  .circular-container {
-    /* Define the size of the circle (Diameter: 160px) */
-    width: 130px;
-    height: 130px;
-    
-    /* Make the container a perfect circle (50% of the width/height) */
-    border-radius: 50%; 
-    
-    /* Hide any part of the image that extends beyond the circle */
-    overflow: hidden; 
-    
-    /* Set the border (The "little border" requested) */
-    border: 3px solid #f0f0f0; /* Example: light gray border */
-    
-    /* Optional: Add a subtle shadow for depth */
-    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
-}
-
-.circular-image {
-    /* Ensure the image fills the container entirely */
-    width: 100%;
-    height: 100%;
-    
-    /* CRITICAL STEP: Crops and scales the image to cover the entire container 
-       without stretching the image itself. */
-    object-fit: cover; 
-}
-
-.text-under {
-    margin-top: 5px;
-    text-align: center;
-}
-
-  
-  /* Responsive */
-  @media (max-width:1000px){
-    .hero{grid-template-columns:1fr;gap:12px}
-    .card{width:300px;flex:0 0 300px}
-    .categories .cat{min-width:82px}
-  }
-
-  @media (max-width:700px){
-    .sidebar{display:none}
-    .main{margin-left:0;padding:14px}
-    .card{width:260px;flex:0 0 260px}
-  }
-</style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BeU Delivery - Find Stores & Order Online</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+    <style>
+        :root {
+            --primary-color: #000000;
+            --secondary-color: #ffffff;
+            --accent-color: #f5f5f5;
+            --text-color: #333333;
+            --border-color: #e0e0e0;
+        }
+        
+        body {
+            background-color: var(--secondary-color);
+            color: var(--text-color);
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+        }
+        
+        .navbar {
+            background-color: var(--primary-color) !important;
+            border-bottom: 1px solid var(--border-color);
+        }
+        
+        .navbar-brand, .nav-link {
+            color: var(--secondary-color) !important;
+        }
+        
+        .nav-link:hover {
+            color: #cccccc !important;
+        }
+        
+        .hero-section {
+            background: linear-gradient(rgba(0,0,0,0.9), rgba(0,0,0,0.8)), 
+                        url('../public/images/hero-bg.jpg');
+            background-size: cover;
+            background-position: center;
+            color: var(--secondary-color);
+            padding: 100px 0 80px;
+            margin-bottom: 40px;
+        }
+        
+        .hero-title {
+            font-weight: 800;
+            font-size: 3.5rem;
+            margin-bottom: 1rem;
+            text-transform: uppercase;
+            letter-spacing: -0.5px;
+        }
+        
+        .search-container {
+            max-width: 800px;
+            margin: 0 auto;
+        }
+        
+        .search-box {
+            background: var(--secondary-color);
+            border-radius: 50px;
+            padding: 5px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+        }
+        
+        .search-box input {
+            border: none;
+            padding: 20px 25px;
+            font-size: 1.1rem;
+            border-radius: 50px;
+        }
+        
+        .search-box input:focus {
+            outline: none;
+            box-shadow: none;
+        }
+        
+        .search-btn {
+            background: var(--primary-color);
+            color: var(--secondary-color);
+            border: none;
+            border-radius: 50px;
+            padding: 15px 35px;
+            font-weight: 600;
+            transition: all 0.3s;
+        }
+        
+        .search-btn:hover {
+            background: #333333;
+        }
+        
+        .category-filter {
+            background: var(--accent-color);
+            padding: 20px 0;
+            margin-bottom: 30px;
+            border-bottom: 1px solid var(--border-color);
+        }
+        
+        .category-btn {
+            background: transparent;
+            border: 2px solid var(--border-color);
+            color: var(--text-color);
+            padding: 10px 20px;
+            border-radius: 50px;
+            margin: 0 5px 10px;
+            transition: all 0.3s;
+            font-weight: 500;
+        }
+        
+        .category-btn:hover,
+        .category-btn.active {
+            background: var(--primary-color);
+            color: var(--secondary-color);
+            border-color: var(--primary-color);
+        }
+        
+        .store-card {
+            background: var(--secondary-color);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            overflow: hidden;
+            transition: all 0.3s;
+            margin-bottom: 25px;
+            height: 100%;
+        }
+        
+        .store-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 15px 35px rgba(0,0,0,0.1);
+            border-color: var(--primary-color);
+        }
+        
+        .store-image {
+            height: 200px;
+            object-fit: cover;
+            width: 100%;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        }
+        
+        .store-image[src*="store-default"] {
+            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 48px;
+            color: white;
+        }
+        
+        .store-image[src*="store-default"]::before {
+            content: '🍽️';
+        }
+        
+        .store-badge {
+            position: absolute;
+            top: 15px;
+            left: 15px;
+            background: var(--primary-color);
+            color: var(--secondary-color);
+            padding: 5px 12px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+        
+        .featured-badge {
+            background: #ff6b6b;
+        }
+        
+        .store-info {
+            padding: 20px;
+        }
+        
+        .store-title {
+            font-weight: 700;
+            font-size: 1.25rem;
+            margin-bottom: 5px;
+            color: var(--primary-color);
+        }
+        
+        .store-category {
+            color: #666;
+            font-size: 0.9rem;
+            margin-bottom: 10px;
+        }
+        
+        .store-rating {
+            display: inline-flex;
+            align-items: center;
+            background: var(--accent-color);
+            padding: 3px 10px;
+            border-radius: 20px;
+            font-size: 0.9rem;
+            margin-bottom: 10px;
+        }
+        
+        .store-rating .stars {
+            color: #ffc107;
+            margin-right: 5px;
+        }
+        
+        .store-details {
+            margin-top: 15px;
+            padding-top: 15px;
+            border-top: 1px solid var(--border-color);
+        }
+        
+        .detail-item {
+            display: flex;
+            align-items: center;
+            margin-bottom: 8px;
+            font-size: 0.9rem;
+            color: #666;
+        }
+        
+        .detail-item i {
+            width: 20px;
+            margin-right: 8px;
+            color: var(--primary-color);
+        }
+        
+        .view-store-btn {
+            background: var(--primary-color);
+            color: var(--secondary-color);
+            border: none;
+            border-radius: 8px;
+            padding: 12px;
+            width: 100%;
+            font-weight: 600;
+            transition: all 0.3s;
+            margin-top: 15px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        
+        .view-store-btn:hover {
+            background: #333333;
+            color: var(--secondary-color);
+        }
+        
+        .pagination-container {
+            margin-top: 50px;
+        }
+        
+        .page-link {
+            color: var(--primary-color);
+            border: 1px solid var(--border-color);
+            padding: 10px 18px;
+            margin: 0 5px;
+            border-radius: 8px;
+        }
+        
+        .page-link:hover {
+            background: var(--primary-color);
+            color: var(--secondary-color);
+            border-color: var(--primary-color);
+        }
+        
+        .page-item.active .page-link {
+            background: var(--primary-color);
+            color: var(--secondary-color);
+            border-color: var(--primary-color);
+        }
+        
+        .results-info {
+            color: #666;
+            font-size: 0.95rem;
+        }
+        
+        .sort-dropdown .btn {
+            border: 1px solid var(--border-color);
+            color: var(--text-color);
+            background: var(--secondary-color);
+        }
+        
+        .empty-state {
+            text-align: center;
+            padding: 80px 20px;
+        }
+        
+        .empty-state i {
+            font-size: 4rem;
+            color: #ddd;
+            margin-bottom: 20px;
+        }
+        
+        .footer {
+            background: var(--primary-color);
+            color: var(--secondary-color);
+            padding: 60px 0 30px;
+            margin-top: 80px;
+        }
+        
+        .footer a {
+            color: #cccccc;
+            text-decoration: none;
+            transition: color 0.3s;
+        }
+        
+        .footer a:hover {
+            color: var(--secondary-color);
+        }
+        
+        .copyright {
+            border-top: 1px solid #333;
+            padding-top: 20px;
+            margin-top: 40px;
+            color: #888;
+            font-size: 0.9rem;
+        }
+        
+        /* Responsive */
+        @media (max-width: 768px) {
+            .hero-title {
+                font-size: 2.5rem;
+            }
+            
+            .search-box input {
+                padding: 15px 20px;
+            }
+            
+            .store-image {
+                height: 180px;
+            }
+            
+            .category-btn {
+                padding: 8px 15px;
+                font-size: 0.9rem;
+            }
+        }
+    </style>
 </head>
 <body>
-
-<h2>🍽 Restaurants</h2>
-<a href="../restaurant/add_resaurant.php">
-    🍽️ Add Your Restaurant
-</a>
-
-<?php while ($r = mysqli_fetch_assoc($res)): ?>
-    <div style="border:1px solid #ccc; padding:10px; margin:10px;">
-        <h3><?= $r['name'] ?></h3>
-        <p><?= $r['description'] ?></p>
-        <a href="restaurant.php?id=<?= $r['id'] ?>">View Menu</a>
+    <!-- Navigation -->
+    <nav class="navbar navbar-expand-lg navbar-dark sticky-top">
+        <div class="container">
+            <a class="navbar-brand fw-bold" href="home.php">
+                <i class="bi bi-basket3 me-2"></i> BEU DELIVERY
+            </a>
+            
+            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+            
+            <div class="collapse navbar-collapse" id="navbarNav">
+                <ul class="navbar-nav me-auto">
+                    <li class="nav-item">
+                        <a class="nav-link active" href="home.php">
+                            <i class="bi bi-house-door me-1"></i> Home
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="orders.php">
+                            <i class="bi bi-receipt me-1"></i> Orders
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="cart.php">
+                            <i class="bi bi-cart3 me-1"></i> Cart
+                        </a>
+                    </li>
+                </ul>
+                
+                <ul class="navbar-nav ms-auto">
+                    <li class="nav-item dropdown">
+                        <a class="nav-link dropdown-toggle" href="#" role="button" data-bs-toggle="dropdown">
+                            <i class="bi bi-person-circle me-1"></i> 
+                            <?php 
+                            echo isset($_SESSION['user_name']) ? 
+                                htmlspecialchars(explode(' ', $_SESSION['user_name'])[0]) : 'Account';
+                            ?>
+                        </a>
+                        <ul class="dropdown-menu dropdown-menu-end">
+                            <li><a class="dropdown-item" href="profile.php">
+                                <i class="bi bi-person me-2"></i> Profile
+                            </a></li>
+                            <li><a class="dropdown-item" href="orders.php">
+                                <i class="bi bi-receipt me-2"></i> My Orders
+                            </a></li>
+                            <li><a class="dropdown-item" href="favorites.php">
+                                <i class="bi bi-heart me-2"></i> Favorites
+                            </a></li>
+                            <li><hr class="dropdown-divider"></li>
+                            <li><a class="dropdown-item" href="../merchant/getStarted.php">
+                                <i class="bi bi-shop me-2"></i> Add Your Restaurant
+                            </a></li>
+                            <li><hr class="dropdown-divider"></li>
+                            <li><a class="dropdown-item" href="../auth/logout.php">
+                                <i class="bi bi-box-arrow-right me-2"></i> Logout
+                            </a></li>
+                        </ul>
+                    </li>
+                </ul>
+            </div>
+        </div>
+    </nav>
+    
+    <!-- Hero Section with Search -->
+    <div class="hero-section">
+        <div class="container">
+            <div class="row justify-content-center">
+                <div class="col-lg-8 text-center">
+                    <h1 class="hero-title">Discover & Order</h1>
+                    <p class="lead mb-5">Find the best stores in your city and get it delivered to your doorstep</p>
+                    
+                    <!-- Search Form -->
+                    <form method="GET" action="" class="search-container">
+                        <div class="search-box">
+                            <div class="input-group">
+                                <input type="text" class="form-control" name="search" 
+                                       placeholder="Search for stores, cuisine, or items..." 
+                                       value="<?php echo htmlspecialchars($search); ?>">
+                                <button class="btn search-btn" type="submit">
+                                    <i class="bi bi-search me-2"></i> Search
+                                </button>
+                            </div>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
     </div>
-<?php endwhile; ?>
-<?php
-$restaurants = mysqli_query($conn, "
-    SELECT id, name, description 
-    FROM restaurants 
-    WHERE status = 'active'
-");
-?>
-
-<?php while ($r = mysqli_fetch_assoc($restaurants)): ?>
-  <div class="restaurant-card">
-    <h4><?= htmlspecialchars($r['name']) ?></h4>
-    <p><?= htmlspecialchars($r['description']) ?></p>
-
-    <a href="restaurant.php?id=<?= $r['id'] ?>" class="order-btn">
-      View Menu
-    </a>
-  </div>
-<?php endwhile; ?>
-<div class="app">
-
-  <!-- LEFT SIDEBAR -->
-  <aside class="sidebar" aria-hidden="false">
-
-    <ul class="side-list">
-      <li><span class="ico">🏠</span> Home</li>
-      <li><span class="ico">🍩</span> Convenience</li>
-      <li><span class="ico">🍺</span> Alcohol</li>
-      <li><span class="ico">🥂</span> Soft Drinks</li>
-      <li><span class="ico">🩺</span> Healthy</li>
-      <li><span class="ico">🍽️</span> Ethiopian</li>
-      <li><span class="ico">🥪</span> Breakfast</li>
-      <li><span class="ico">🥘</span> Launch</li>
-      <li><span class="ico">🏷️</span> Dinner</li>
-      <li><span class="ico">🌮</span> Fast Food</li>
-      
-    </ul>
-  </aside>
-
-  <!-- MAIN -->
-  <main class="main">
-
-    <!-- TOP BAR -->
-    <div class="topbar">
-        <a href="index2.html">
-      <div class="hamburger">☰</div> </a>
-      <div class="logo-sm">BeU Delivery</div>
-
-
-      <div class="search">
-        <input placeholder="Search Uber Eats" />
-      </div>
-
-      <div class="actions">
-        <div class="cart">🛒 <span style="font-size:13px;color:var(--muted)">0</span></div>
-       
-      </div>
+    
+    <!-- Become a Merchant Banner -->
+    <div class="container my-4">
+        <div class="alert alert-dark d-flex align-items-center justify-content-between" style="border-radius: 12px; border: 2px solid #000;">
+            <div class="d-flex align-items-center">
+                <i class="bi bi-shop" style="font-size: 2rem; margin-right: 15px;"></i>
+                <div>
+                    <h5 class="mb-1">Own a Restaurant?</h5>
+                    <p class="mb-0">Partner with us and reach thousands of customers</p>
+                </div>
+            </div>
+            <a href="../merchant/getStarted.php" class="btn btn-light btn-lg">
+                <i class="bi bi-plus-circle me-2"></i> Add Your Restaurant
+            </a>
+        </div>
     </div>
-
-    <!-- CATEGORY STRIP -->
-    <div class="categories" role="list">
-      <div class="cat"><div class="circle">🍌</div>Grocery</div>
-      <div class="cat"><div class="circle">🍕</div>Pizza</div>
-      <div class="cat"><div class="circle">🍜</div>Soup</div>
-      <div class="cat"><div class="circle">🍣</div>Sushi</div>
-      <div class="cat"><div class="circle">🥗</div>Healthy</div>
-      <div class="cat"><div class="circle">🌮</div>Mexican</div>
-      <div class="cat"><div class="circle">🍩</div>Bakery</div>
-      <div class="cat"><div class="circle">🥟</div>Chinese</div>
+    
+    <!-- Category Filter -->
+    <div class="category-filter">
+        <div class="container">
+            <div class="d-flex flex-wrap justify-content-center">
+                <a href="?<?php echo buildQueryString(['category' => 'all']); ?>" 
+                   class="category-btn <?php echo (empty($category) || $category == 'all') ? 'active' : ''; ?>">
+                    <i class="bi bi-grid-3x3-gap me-2"></i> All Stores
+                </a>
+                
+                <?php while($cat = mysqli_fetch_assoc($categories_result)): ?>
+                <a href="?<?php echo buildQueryString(['category' => $cat['name']]); ?>" 
+                   class="category-btn <?php echo ($category == $cat['name']) ? 'active' : ''; ?>">
+                    <i class="bi <?php echo htmlspecialchars($cat['icon']); ?> me-2"></i>
+                    <?php echo htmlspecialchars($cat['name']); ?>
+                </a>
+                <?php endwhile; ?>
+            </div>
+        </div>
     </div>
-
-    <!-- HERO: left big text + right promo -->
-    <section class="hero">
-      <div class="hero-left">
+    
+    <!-- Main Content -->
+    <div class="container">
+        <!-- Results Header -->
+        <div class="row mb-4 align-items-center">
+            <div class="col-md-6">
+                <h3 class="mb-0">Available Stores</h3>
+                <p class="results-info mb-0">
+                    Showing <?php echo ($total_count > 0) ? (($page-1)*$limit + 1) : 0; ?> - 
+                    <?php echo min($page*$limit, $total_count); ?> of <?php echo $total_count; ?> stores
+                </p>
+            </div>
+            <div class="col-md-6 text-md-end">
+                <div class="sort-dropdown d-inline-block">
+                    <div class="btn-group">
+                        <button type="button" class="btn dropdown-toggle" data-bs-toggle="dropdown">
+                            Sort by: 
+                            <?php 
+                            $sort_labels = [
+                                'default' => 'Newest',
+                                'rating' => 'Rating',
+                                'delivery_time' => 'Delivery Time',
+                                'name' => 'Name A-Z',
+                                'featured' => 'Featured'
+                            ];
+                            echo $sort_labels[$sort] ?? 'Newest';
+                            ?>
+                        </button>
+                        <ul class="dropdown-menu dropdown-menu-end">
+                            <li><a class="dropdown-item" href="?<?php echo buildQueryString(['sort' => 'default']); ?>">Newest</a></li>
+                            <li><a class="dropdown-item" href="?<?php echo buildQueryString(['sort' => 'rating']); ?>">Rating</a></li>
+                            <li><a class="dropdown-item" href="?<?php echo buildQueryString(['sort' => 'delivery_time']); ?>">Delivery Time</a></li>
+                            <li><a class="dropdown-item" href="?<?php echo buildQueryString(['sort' => 'name']); ?>">Name A-Z</a></li>
+                            <li><a class="dropdown-item" href="?<?php echo buildQueryString(['sort' => 'featured']); ?>">Featured</a></li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
         
-        <h2>Search for a favorite restaurant, cuisine, or dish.</h2>
-        <p style="max-width:720px;color:var(--muted)">
-          Browse top offers, delivery times, ratings and more. Scroll down to see curated deals and national favorites.
-        </p>
-      </div>
-
-      <aside class="promo">
-        <div style="font-weight:700;font-size:18px">Subway National Cookie Day</div>
-        <div>6 free cookies with $25+ • Thru 12/14. T&C apply.</div>
-        <button class="cta">Order now</button>
-      </aside>
-    </section>
-
-    <!-- SECTIONS rows -->
-    <section class="section">
-      <div class="header">
-        <h3>Most loved deals on BeU Delivery</h3>
-        <div class="seeall">See all ➜</div>
-      </div>
-
-      <div class="row">
-        <a href="Restaurants/kaldis.html">
-            <div class="card">
-            <div class="img" style="background-image:url('Images/kaldis.jpg')">
-                <div class="badge">Save on Select Items</div>
+        <!-- Stores Grid -->
+        <?php if (mysqli_num_rows($stores_result) > 0): ?>
+            <div class="row">
+                <?php while($store = mysqli_fetch_assoc($stores_result)): 
+                    // Parse cuisine types
+                    $cuisine_list = [];
+                    if (!empty($store['cuisine_types'])) {
+                        $cuisine_data = json_decode($store['cuisine_types'], true);
+                        if (is_array($cuisine_data) && isset($cuisine_data[0])) {
+                            $cuisine_list = json_decode($cuisine_data[0], true);
+                        }
+                    }
+                    
+                    // Get store image from store_images table
+                    $store_image = null;
+                    
+                    if (!empty($store['store_image_path'])) {
+                        // Use the image from store_images table
+                        $store_image = '../' . $store['store_image_path'];
+                        
+                        // Verify file exists using absolute path
+                        $absolute_path = __DIR__ . '/../' . $store['store_image_path'];
+                        if (!file_exists($absolute_path)) {
+                            $store_image = null;
+                        }
+                    }
+                    
+                    // If no store image, try featured_image from merchants table
+                    if (!$store_image && !empty($store['featured_image'])) {
+                        $possible_paths = [
+                            'account/uploads/store_images/' . $store['featured_image'],
+                            'merchant/uploads/' . $store['featured_image'],
+                            'uploads/merchants/' . $store['featured_image']
+                        ];
+                        
+                        foreach ($possible_paths as $path) {
+                            $absolute_path = __DIR__ . '/../' . $path;
+                            if (file_exists($absolute_path)) {
+                                $store_image = '../' . $path;
+                                break;
+                            }
+                        }
+                    }
+                    
+                    // If still no image, use default placeholder
+                    if (!$store_image) {
+                        $store_image = '../public/images/store-default.jpg';
+                    }
+                ?>
+                <div class="col-lg-4 col-md-6">
+                    <div class="store-card">
+                        <!-- Store Image -->
+                        <div style="position: relative;">
+                            <img src="<?php echo $store_image; ?>" 
+                                 alt="<?php echo htmlspecialchars($store['store_name']); ?>" 
+                                 class="store-image" 
+                                 onerror="this.src='../public/images/store-default.jpg'">
+                            
+                            <?php if ($store['is_featured']): ?>
+                            <span class="store-badge featured-badge">
+                                <i class="bi bi-star-fill me-1"></i> Featured
+                            </span>
+                            <?php endif; ?>
+                            
+                            <?php if ($store['category_name']): ?>
+                            <span class="store-badge" style="top: 45px;">
+                                <i class="bi <?php echo htmlspecialchars($store['category_icon']); ?> me-1"></i>
+                                <?php echo htmlspecialchars($store['category_name']); ?>
+                            </span>
+                            <?php endif; ?>
+                        </div>
+                        
+                        <!-- Store Info -->
+                        <div class="store-info">
+                            <div class="d-flex justify-content-between align-items-start">
+                                <div>
+                                    <h4 class="store-title"><?php echo htmlspecialchars($store['store_name']); ?></h4>
+                                    <div class="store-category">
+                                        <?php if (!empty($cuisine_list) && is_array($cuisine_list)): ?>
+                                        <?php echo htmlspecialchars(implode(', ', array_slice($cuisine_list, 0, 2))); ?>
+                                        <?php if (count($cuisine_list) > 2): ?>...<?php endif; ?>
+                                        <?php endif; ?>
+                                    </div>
+                                </div>
+                                
+                                <?php if ($store['rating'] > 0): ?>
+                                <div class="store-rating">
+                                    <span class="stars">
+                                        <i class="bi bi-star-fill"></i>
+                                        <?php echo number_format($store['rating'], 1); ?>
+                                    </span>
+                                    <small class="text-muted">(<?php echo $store['review_count']; ?>)</small>
+                                </div>
+                                <?php endif; ?>
+                            </div>
+                            
+                            <!-- Store Details -->
+                            <div class="store-details">
+                                <div class="detail-item">
+                                    <i class="bi bi-geo-alt"></i>
+                                    <span><?php echo htmlspecialchars($store['store_address']); ?></span>
+                                </div>
+                                
+                                <?php if ($store['estimated_delivery_time']): ?>
+                                <div class="detail-item">
+                                    <i class="bi bi-clock"></i>
+                                    <span><?php echo $store['estimated_delivery_time']; ?> min delivery</span>
+                                </div>
+                                <?php endif; ?>
+                                
+                                <?php if ($store['delivery_fee']): ?>
+                                <div class="detail-item">
+                                    <i class="bi bi-truck"></i>
+                                    <span>
+                                        <?php if ($store['delivery_fee'] == 0): ?>
+                                        Free delivery
+                                        <?php else: ?>
+                                        $<?php echo number_format($store['delivery_fee'], 2); ?> delivery
+                                        <?php endif; ?>
+                                    </span>
+                                </div>
+                                <?php endif; ?>
+                                
+                                <?php if ($store['menu_item_count'] > 0): ?>
+                                <div class="detail-item">
+                                    <i class="bi bi-menu-button-wide"></i>
+                                    <span><?php echo $store['menu_item_count']; ?> menu items</span>
+                                </div>
+                                <?php endif; ?>
+                            </div>
+                            
+                            <!-- View Store Button -->
+                            <a href="store.php?id=<?php echo $store['merchant_id']; ?>" class="btn view-store-btn">
+                                <i class="bi bi-shop me-2"></i> Browse Menu
+                            </a>
+                        </div>
+                    </div>
+                </div>
+                <?php endwhile; ?>
             </div>
-            <div class="meta">
-                <h4>kaldis Coffee</h4>
-                <div class="sub">⭐ 4.8 (10,000+) · 31 min</div>
+            
+            <!-- Pagination -->
+            <?php if ($total_pages > 1): ?>
+            <div class="pagination-container">
+                <nav aria-label="Page navigation">
+                    <ul class="pagination justify-content-center">
+                        <?php if ($page > 1): ?>
+                        <li class="page-item">
+                            <a class="page-link" href="?<?php echo buildQueryString(['page' => $page - 1]); ?>">
+                                <i class="bi bi-chevron-left"></i> Previous
+                            </a>
+                        </li>
+                        <?php endif; ?>
+                        
+                        <?php 
+                        // Show page numbers
+                        $start_page = max(1, $page - 2);
+                        $end_page = min($total_pages, $page + 2);
+                        
+                        for ($i = $start_page; $i <= $end_page; $i++): 
+                        ?>
+                        <li class="page-item <?php echo ($i == $page) ? 'active' : ''; ?>">
+                            <a class="page-link" href="?<?php echo buildQueryString(['page' => $i]); ?>">
+                                <?php echo $i; ?>
+                            </a>
+                        </li>
+                        <?php endfor; ?>
+                        
+                        <?php if ($page < $total_pages): ?>
+                        <li class="page-item">
+                            <a class="page-link" href="?<?php echo buildQueryString(['page' => $page + 1]); ?>">
+                                Next <i class="bi bi-chevron-right"></i>
+                            </a>
+                        </li>
+                        <?php endif; ?>
+                    </ul>
+                </nav>
             </div>
+            <?php endif; ?>
+            
+        <?php else: ?>
+            <!-- Empty State -->
+            <div class="empty-state">
+                <i class="bi bi-shop"></i>
+                <h3 class="mt-4">No stores found</h3>
+                <p class="text-muted mb-4">
+                    <?php if (!empty($search)): ?>
+                    No stores match your search "<?php echo htmlspecialchars($search); ?>"
+                    <?php else: ?>
+                    No stores are currently available. Check back soon!
+                    <?php endif; ?>
+                </p>
+                <?php if (!empty($search)): ?>
+                <a href="home.php" class="btn btn-dark">
+                    <i class="bi bi-arrow-left me-2"></i> Clear Search
+                </a>
+                <?php endif; ?>
             </div>
-        </a>
-
-        <div class="card">
-          <div class="img" style="background-image:url('Images/doka.jpg')">
-            <div class="badge">Top Offer · 20% off</div>
-          </div>
-          <div class="meta">
-            <h4>Doka Cafe</h4>
-            <div class="sub">⭐ 4.6 (1,500+) · 10 min</div>
-          </div>
-        </div>
-
-        <div class="card">
-          <div class="img" style="background-image:url('Images/habesha-2000.jpg')">
-            <div class="badge">Top Offer · Spend $40, Save $11</div>
-          </div>
-          <div class="meta">
-            <h4>2000 Habesha</h4>
-            <div class="sub">⭐ 4.8 (9,000+) · 25 min</div>
-          </div>
-        </div>
-
-        <div class="card">
-          <div class="img" style="background-image:url('Images/yod.jpg')">
-            <div class="badge">Top Offer · Buy 1 Get 1 Free</div>
-          </div>
-          <div class="meta">
-            <h4>Yod Abisinia</h4>
-            <div class="sub">⭐ 4.7 (5,000+) · 10 min</div>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- BUY 1 GET 1 -->
-    <section class="section">
-      <div class="header">
-        <h3>Buy 1, get 1 free</h3>
-        <div class="seeall">See all ➜</div>
-      </div>
-
-      <div class="row">
-        <div class="card">
-          <div class="img" style="background-image:url('https://picsum.photos/640/400?image=1008')">
-            <div class="badge">Top Offer · Buy 1, Get 1 Free</div>
-          </div>
-          <div class="meta">
-            <h4>Koya Omakase</h4>
-            <div class="sub">⭐ 4.4 (1,000+) · 20 min</div>
-          </div>
-        </div>
-
-        <div class="card">
-          <div class="img" style="background-image:url('https://picsum.photos/640/400?image=1024')">
-            <div class="badge">Top Offer · Buy 1, Get 1 Free</div>
-          </div>
-          <div class="meta">
-            <h4>Hub Thai</h4>
-            <div class="sub">⭐ 4.8 (5,000+) · 25 min</div>
-          </div>
-        </div>
-
-        <div class="card">
-          <div class="img" style="background-image:url('https://picsum.photos/640/400?image=1036')">
-            <div class="badge">Top Offer · Buy 1, Get 1 Free</div>
-          </div>
-          <div class="meta">
-            <h4>Cap't Loui</h4>
-            <div class="sub">⭐ 4.7 (66) · 24 min</div>
-          </div>
-        </div>
-
-        <div class="card">
-          <div class="img" style="background-image:url('https://picsum.photos/640/400?image=1048')">
-            <div class="badge">Top Offer</div>
-          </div>
-          <div class="meta">
-            <h4>Ootoya</h4>
-            <div class="sub">⭐ 4.8 (1,000+) · 20 min</div>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- NATIONAL FAVORITES -->
-    <section class="section">
-      <div class="header">
-        <h3>National favorites</h3>
-        <div class="seeall">See all ➜</div>
-      </div>
-
-      <div class="row">
-        <div class="card" style="width:460px;flex:0 0 460px">
-          <div class="img" style="background-image:url('https://picsum.photos/900/400?image=1025');height:160px">
-            <div class="badge">Free Item (Spend $14)</div>
-          </div>
-          <div class="meta">
-            <h4>Domino's</h4>
-            <div class="sub">⭐ 4.4 (500+) · 19 min</div>
-          </div>
-        </div>
-
-        <div class="card" style="width:360px;flex:0 0 360px">
-          <div class="img" style="background-image:url('https://picsum.photos/900/400?image=1011')">
-            <div class="badge">Buy 1, Get 1 Free</div>
-          </div>
-          <div class="meta">
-            <h4>Shake Shack</h4>
-            <div class="sub">⭐ 4.6 (7,000+) · 13 min</div>
-          </div>
-        </div>
-
-        <div class="card" style="width:360px;flex:0 0 360px">
-          <div class="img" style="background-image:url('https://picsum.photos/900/400?image=1003')">
-            <div class="badge">Spend $25, Save $8</div>
-          </div>
-          <div class="meta">
-            <h4>P.F. Chang's</h4>
-            <div class="sub">⭐ 4.1 (1,500+) · 10 min</div>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- STORES NEAR YOU (circular) -->
-    <section class="section">
-      <div class="header">
-        <h3>Stores near you</h3>
-        <div class="seeall">See all ➜</div>
-      </div>
-
-      <div class="store-list">
-        <div>
-            <div class="circular-container">
-                <img src="rest1.avif" class="circular-image">
+        <?php endif; ?>
+    </div>
+    
+    <!-- Footer -->
+    <footer class="footer">
+        <div class="container">
+            <div class="row">
+                <div class="col-lg-4 mb-4">
+                    <h4 class="mb-4">BEU DELIVERY</h4>
+                    <p>Your trusted partner for food and goods delivery. Fast, reliable, and convenient.</p>
+                </div>
+                
+                <div class="col-lg-2 col-md-4 mb-4">
+                    <h5 class="mb-4">Quick Links</h5>
+                    <ul class="list-unstyled">
+                        <li class="mb-2"><a href="home.php">Home</a></li>
+                        <li class="mb-2"><a href="orders.php">My Orders</a></li>
+                        <li class="mb-2"><a href="cart.php">Cart</a></li>
+                        <li class="mb-2"><a href="profile.php">Profile</a></li>
+                    </ul>
+                </div>
+                
+                <div class="col-lg-3 col-md-4 mb-4">
+                    <h5 class="mb-4">For Stores</h5>
+                    <ul class="list-unstyled">
+                        <li class="mb-2"><a href="../merchant/getStarted.php">Add Your Store</a></li>
+                        <li class="mb-2"><a href="#">Merchant Portal</a></li>
+                        <li class="mb-2"><a href="#">Partner Program</a></li>
+                    </ul>
+                </div>
+                
+                <div class="col-lg-3 col-md-4 mb-4">
+                    <h5 class="mb-4">Contact Us</h5>
+                    <ul class="list-unstyled">
+                        <li class="mb-2">
+                            <i class="bi bi-telephone me-2"></i> 1-800-BEU-FOOD
+                        </li>
+                        <li class="mb-2">
+                            <i class="bi bi-envelope me-2"></i> support@beudelivery.com
+                        </li>
+                        <li class="mb-2">
+                            <i class="bi bi-geo-alt me-2"></i> Addis Ababa, Ethiopia
+                        </li>
+                    </ul>
+                </div>
             </div>
-            <div class="text-under">Wegmans<br><small style="color:var(--muted)">31 min</small></div>
-        </div>
-        <div>
-            <div class="circular-container">
-                <img src="rest1.avif" class="circular-image">
+            
+            <div class="copyright text-center">
+                <p class="mb-0">&copy; <?php echo date('Y'); ?> BeU Delivery. All rights reserved.</p>
             </div>
-            <div class="text-under">Wegmans<br><small style="color:var(--muted)">31 min</small></div>
         </div>
-        <div>
-            <div class="circular-container">
-                <img src="rest1.avif" class="circular-image">
-            </div>
-            <div class="text-under">Wegmans<br><small style="color:var(--muted)">31 min</small></div>
-        </div>
-        <div>
-            <div class="circular-container">
-                <img src="rest1.avif" class="circular-image">
-            </div>
-            <div class="text-under">Wegmans<br><small style="color:var(--muted)">31 min</small></div>
-        </div>
-        <div>
-            <div class="circular-container">
-                <img src="rest1.avif" class="circular-image">
-            </div>
-            <div class="text-under">Wegmans<br><small style="color:var(--muted)">31 min</small></div>
-        </div>
-        <div>
-            <div class="circular-container">
-                <img src="rest1.avif" class="circular-image">
-            </div>
-            <div class="text-under">Wegmans<br><small style="color:var(--muted)">31 min</small></div>
-        </div>
-        <div>
-            <div class="circular-container">
-                <img src="rest1.avif" class="circular-image">
-            </div>
-            <div class="text-under">Wegmans<br><small style="color:var(--muted)">31 min</small></div>
-        </div>
-        <div>
-            <div class="circular-container">
-                <img src="rest1.avif" class="circular-image">
-            </div>
-            <div class="text-under">Wegmans<br><small style="color:var(--muted)">31 min</small></div>
-        </div>
-      </div>
-    </section>
+    </footer>
+    
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+    // Live search functionality
+    document.addEventListener('DOMContentLoaded', function() {
+        const searchInput = document.querySelector('input[name="search"]');
+        let searchTimeout;
+        
+        searchInput.addEventListener('input', function() {
+            clearTimeout(searchTimeout);
+            searchTimeout = setTimeout(function() {
+                if (searchInput.value.length >= 2 || searchInput.value.length === 0) {
+                    // Submit form
+                    const form = searchInput.closest('form');
+                    const urlParams = new URLSearchParams(window.location.search);
+                    urlParams.set('search', searchInput.value);
+                    urlParams.set('page', '1'); // Reset to first page on search
+                    window.location.href = 'home.php?' + urlParams.toString();
+                }
+            }, 500);
+        });
 
-    <!-- BUY 1 GET 1 -->
-    <section class="section">
-      <div class="header">
-        <h3>Buy 1, get 1 free</h3>
-        <div class="seeall">See all ➜</div>
-      </div>
-
-      <div class="row">
-        <div class="card">
-          <div class="img" style="background-image:url('https://picsum.photos/640/400?image=1008')">
-            <div class="badge">Top Offer · Buy 1, Get 1 Free</div>
-          </div>
-          <div class="meta">
-            <h4>Koya Omakase</h4>
-            <div class="sub">⭐ 4.4 (1,000+) · 20 min</div>
-          </div>
-        </div>
-
-        <div class="card">
-          <div class="img" style="background-image:url('https://picsum.photos/640/400?image=1024')">
-            <div class="badge">Top Offer · Buy 1, Get 1 Free</div>
-          </div>
-          <div class="meta">
-            <h4>Hub Thai</h4>
-            <div class="sub">⭐ 4.8 (5,000+) · 25 min</div>
-          </div>
-        </div>
-
-        <div class="card">
-          <div class="img" style="background-image:url('https://picsum.photos/640/400?image=1036')">
-            <div class="badge">Top Offer · Buy 1, Get 1 Free</div>
-          </div>
-          <div class="meta">
-            <h4>Cap't Loui</h4>
-            <div class="sub">⭐ 4.7 (66) · 24 min</div>
-          </div>
-        </div>
-
-        <div class="card">
-          <div class="img" style="background-image:url('https://picsum.photos/640/400?image=1048')">
-            <div class="badge">Top Offer</div>
-          </div>
-          <div class="meta">
-            <h4>Ootoya</h4>
-            <div class="sub">⭐ 4.8 (1,000+) · 20 min</div>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- BUY 1 GET 1 -->
-    <section class="section">
-      <div class="header">
-        <h3>Buy 1, get 1 free</h3>
-        <div class="seeall">See all ➜</div>
-      </div>
-
-      <div class="row">
-        <div class="card">
-          <div class="img" style="background-image:url('https://picsum.photos/640/400?image=1008')">
-            <div class="badge">Top Offer · Buy 1, Get 1 Free</div>
-          </div>
-          <div class="meta">
-            <h4>Koya Omakase</h4>
-            <div class="sub">⭐ 4.4 (1,000+) · 20 min</div>
-          </div>
-        </div>
-
-        <div class="card">
-          <div class="img" style="background-image:url('https://picsum.photos/640/400?image=1024')">
-            <div class="badge">Top Offer · Buy 1, Get 1 Free</div>
-          </div>
-          <div class="meta">
-            <h4>Hub Thai</h4>
-            <div class="sub">⭐ 4.8 (5,000+) · 25 min</div>
-          </div>
-        </div>
-
-        <div class="card">
-          <div class="img" style="background-image:url('https://picsum.photos/640/400?image=1036')">
-            <div class="badge">Top Offer · Buy 1, Get 1 Free</div>
-          </div>
-          <div class="meta">
-            <h4>Cap't Loui</h4>
-            <div class="sub">⭐ 4.7 (66) · 24 min</div>
-          </div>
-        </div>
-
-        <div class="card">
-          <div class="img" style="background-image:url('https://picsum.photos/640/400?image=1048')">
-            <div class="badge">Top Offer</div>
-          </div>
-          <div class="meta">
-            <h4>Ootoya</h4>
-            <div class="sub">⭐ 4.8 (1,000+) · 20 min</div>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- BUY 1 GET 1 -->
-    <section class="section">
-      <div class="header">
-        <h3>Buy 1, get 1 free</h3>
-        <div class="seeall">See all ➜</div>
-      </div>
-
-      <div class="row">
-        <div class="card">
-          <div class="img" style="background-image:url('https://picsum.photos/640/400?image=1008')">
-            <div class="badge">Top Offer · Buy 1, Get 1 Free</div>
-          </div>
-          <div class="meta">
-            <h4>Koya Omakase</h4>
-            <div class="sub">⭐ 4.4 (1,000+) · 20 min</div>
-          </div>
-        </div>
-
-        <div class="card">
-          <div class="img" style="background-image:url('https://picsum.photos/640/400?image=1024')">
-            <div class="badge">Top Offer · Buy 1, Get 1 Free</div>
-          </div>
-          <div class="meta">
-            <h4>Hub Thai</h4>
-            <div class="sub">⭐ 4.8 (5,000+) · 25 min</div>
-          </div>
-        </div>
-
-        <div class="card">
-          <div class="img" style="background-image:url('https://picsum.photos/640/400?image=1036')">
-            <div class="badge">Top Offer · Buy 1, Get 1 Free</div>
-          </div>
-          <div class="meta">
-            <h4>Cap't Loui</h4>
-            <div class="sub">⭐ 4.7 (66) · 24 min</div>
-          </div>
-        </div>
-
-        <div class="card">
-          <div class="img" style="background-image:url('https://picsum.photos/640/400?image=1048')">
-            <div class="badge">Top Offer</div>
-          </div>
-          <div class="meta">
-            <h4>Ootoya</h4>
-            <div class="sub">⭐ 4.8 (1,000+) · 20 min</div>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- BUY 1 GET 1 -->
-    <section class="section">
-      <div class="header">
-        <h3>Buy 1, get 1 free</h3>
-        <div class="seeall">See all ➜</div>
-      </div>
-
-      <div class="row">
-        <div class="card">
-          <div class="img" style="background-image:url('https://picsum.photos/640/400?image=1008')">
-            <div class="badge">Top Offer · Buy 1, Get 1 Free</div>
-          </div>
-          <div class="meta">
-            <h4>Koya Omakase</h4>
-            <div class="sub">⭐ 4.4 (1,000+) · 20 min</div>
-          </div>
-        </div>
-
-        <div class="card">
-          <div class="img" style="background-image:url('https://picsum.photos/640/400?image=1024')">
-            <div class="badge">Top Offer · Buy 1, Get 1 Free</div>
-          </div>
-          <div class="meta">
-            <h4>Hub Thai</h4>
-            <div class="sub">⭐ 4.8 (5,000+) · 25 min</div>
-          </div>
-        </div>
-
-        <div class="card">
-          <div class="img" style="background-image:url('https://picsum.photos/640/400?image=1036')">
-            <div class="badge">Top Offer · Buy 1, Get 1 Free</div>
-          </div>
-          <div class="meta">
-            <h4>Cap't Loui</h4>
-            <div class="sub">⭐ 4.7 (66) · 24 min</div>
-          </div>
-        </div>
-
-        <div class="card">
-          <div class="img" style="background-image:url('https://picsum.photos/640/400?image=1048')">
-            <div class="badge">Top Offer</div>
-          </div>
-          <div class="meta">
-            <h4>Ootoya</h4>
-            <div class="sub">⭐ 4.8 (1,000+) · 20 min</div>
-          </div>
-        </div>
-      </div>
-    </section>
-  </main>
-</div>
+        // Add to the existing script
+const searchForm = document.querySelector('form[method="GET"]');
+searchForm.addEventListener('submit', function(e) {
+    e.preventDefault();
+    const searchInput = this.querySelector('input[name="search"]');
+    const urlParams = new URLSearchParams(window.location.search);
+    urlParams.set('search', searchInput.value);
+    urlParams.set('page', '1');
+    window.location.href = 'home.php?' + urlParams.toString();
+});
+        
+        // Category filter animation
+        const categoryBtns = document.querySelectorAll('.category-btn');
+        categoryBtns.forEach(btn => {
+            btn.addEventListener('click', function(e) {
+                categoryBtns.forEach(b => b.classList.remove('active'));
+                this.classList.add('active');
+            });
+        });
+    });
+    
+    // Helper function to build query string (defined in PHP)
+    function buildQueryString(newParams) {
+        // This function is implemented in PHP below
+        return '';
+    }
+    </script>
 </body>
 </html>
-
-
-
-
+<?php
+// Helper function to build query string while preserving existing parameters
+function buildQueryString($newParams = []) {
+    $params = $_GET;
+    
+    // Remove page parameter when changing filters
+    if (isset($newParams['category']) || isset($newParams['delivery']) || isset($newParams['sort'])) {
+        unset($params['page']);
+    }
+    
+    // Merge new parameters
+    $params = array_merge($params, $newParams);
+    
+    // Remove empty parameters
+    $params = array_filter($params);
+    
+    return http_build_query($params);
+}
+?>

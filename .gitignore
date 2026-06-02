@@ -1,0 +1,97 @@
+# Configuration files with sensitive data
+config.php
+includes/db.php
+
+# Environment files
+.env
+.env.local
+.env.production
+
+# Upload directories
+uploads/*
+!uploads/.gitkeep
+merchant/uploads/*
+!merchant/uploads/.gitkeep
+account/uploads/*
+!account/uploads/.gitkeep
+restaurant/uploads/*
+!restaurant/uploads/.gitkeep
+
+# Log files
+logs/
+*.log
+debug.log
+error.log
+
+# Cache files
+cache/
+*.cache
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# IDE and editor files
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+.DS_Store
+Thumbs.db
+
+# Composer
+vendor/
+composer.lock
+
+# Node modules (if using npm)
+node_modules/
+package-lock.json
+
+# Build files
+dist/
+build/
+
+# Backup files
+*.bak
+*.backup
+*.sql.gz
+*.sql.zip
+
+# System files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Desktop.ini
+
+# PHP
+*.php~
+*.swp
+*.swo
+
+# Database dumps
+*.sql
+!database/schema.sql
+
+# Session files
+sessions/
+
+# Sensitive documents
+*.pem
+*.key
+*.cert
+*.crt
+
+# Test files
+phpunit.xml
+.phpunit.result.cache
+
+# Coverage reports
+coverage/
+.coverage
+
+# Documentation builds
+docs/_build/

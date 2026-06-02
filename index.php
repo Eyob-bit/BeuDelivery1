@@ -30,7 +30,7 @@ body {
 }
 
 .for-background {
-  background-image: url('images/Gemini_Generated_Image_h3yu5kh3yu5kh3yu.png');
+  background-image: url('public/images/foreground.png');
     background-size: cover;
     background-position: center;
     height: 100vh;
@@ -377,18 +377,80 @@ footer {
 .footer-column-links .fa-globe {
     margin-right: 5px;
 }
+/* ===== Sidebar Menu ===== */
+#overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0,0,0,0.5);
+    display: none;
+    z-index: 1000;
+}
+
+#sideMenu {
+    position: fixed;
+    top: 0;
+    left: -300px;
+    width: 280px;
+    height: 100%;
+    background: #fff;
+    padding: 20px;
+    box-shadow: 2px 0 10px rgba(0,0,0,0.2);
+    transition: left 0.3s ease;
+    z-index: 1001;
+}
+
+#sideMenu a {
+    display: block;
+    padding: 12px 0;
+    font-size: 16px;
+    color: #000;
+    border-bottom: 1px solid #eee;
+}
+
+#sideMenu a:hover {
+    color: var(--uber-green);
+}
+
+.close-btn {
+    background: none;
+    border: none;
+    font-size: 28px;
+    cursor: pointer;
+    margin-bottom: 20px;
+}
+
     </style>
 </head>
 <body>
+    <!-- Overlay -->
+<div id="overlay" onclick="closeMenu()"></div>
+
+<!-- Sidebar Menu -->
+<div id="sideMenu">
+    <button class="close-btn" onclick="closeMenu()">×</button>
+
+    <a href="#">Home</a>
+    <a href="#">Restaurants</a>
+    <a href="#">Orders</a>
+    <a href="#">Help</a>
+    <a href="merchant/getStarted.php">Add Restaurant</a>
+</div>
+
   <section class="for-background">
     <header>
         <div class="header-content">
             <div class="header-left">
-                <a href="index2.html">
+                
                   <div class="menuu">
-                    <button class="menu-button"><i class="fas fa-bars"></i></button>
+                    <button class="menu-button" onclick="openMenu()">
+                        <i class="fas fa-bars"></i>
+                    </button>
+
                   </div>
-                </a>
+                
                 <a href="index.html"><div class="logo">BeU Delivery</div></a>
                 <div class="delivery-address-bar">
                     <span class="icon"><i class="fas fa-location-dot"></i></span>
@@ -396,8 +458,8 @@ footer {
                 </div>
             </div>
             <div class="header-right">
-                <a href="SignUp/signup.html" class="btn-primary">Sign up</a>
-                <a href="Login/login.html" class="btn-secondary">Log in</a>
+                <a href="auth/signup.php" class="btn-primary">Sign up</a>
+                <a href="auth/login.php" class="btn-secondary">Log in</a>
             </div>
         </div>
     </header>
@@ -420,21 +482,21 @@ footer {
     <section class="callout-cards-section">
         <div class="callout-cards-container">
             <a href="#" class="card">
-                <img src="images/feed.jpg" alt="Person working on laptop and eating salad">
+                <img src="public/images/feed.jpg" alt="Person working on laptop and eating salad">
                 <div class="card-text">
                     <h3>Feed your employees</h3>
                     <p>Create a business account</p>
                 </div>
             </a>
-            <a href="Add restaurant.html/getStarted.html" class="card">
-                <img src="images/restaurant.jpg" alt="Chef cooking on a stove">
+            <a href="restaurant/add_resaurant.php" class="card">
+                <img src="public/images/restaurant.jpg" alt="Chef cooking on a stove">
                 <div class="card-text">
                     <h3>Your restaurant, delivered</h3>
                     <p>Add your restaurant</p>
                 </div>
             </a>
             <a href="#" class="card">
-                <img src="images/delivery.jpg" alt="Delivery driver on a bike">
+                <img src="public/images/delivery.jpg" alt="Delivery driver on a bike">
                 <div class="card-text">
                     <h3>Deliver with Uber Eats</h3>
                     <p>Sign up to deliver</p>
@@ -523,6 +585,17 @@ footer {
             </footer>
         </div>
     </section>
+<script>
+function openMenu() {
+    document.getElementById("sideMenu").style.left = "0";
+    document.getElementById("overlay").style.display = "block";
+}
+
+function closeMenu() {
+    document.getElementById("sideMenu").style.left = "-320px";
+    document.getElementById("overlay").style.display = "none";
+}
+</script>
 
 </body>
 </html>

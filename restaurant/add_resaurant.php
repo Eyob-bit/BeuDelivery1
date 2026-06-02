@@ -14,6 +14,9 @@ $user_id = $_SESSION['user_id'];
 
 <form action="save_restaurant.php" method="POST">
     <input type="text" name="name" placeholder="Restaurant Name" required><br><br>
-    <textarea name="description" placeholder="Description"></textarea><br><br>
+    <textarea name="description" placeholder="Description"></textarea><br><br><input type="file" name="images[]" multiple required>
+
+    <input type="file" name="images[]" multiple required>
+
     <button type="submit">Submit for Approval</button>
 </form>

@@ -13,13 +13,24 @@ $user_id = $_SESSION['user_id'];
 $name = trim($_POST['name'] ?? '');
 $desc = trim($_POST['description'] ?? '');
 
+foreach ($_FILES['images']['tmp_name'] as $key => $tmp) {
+    $name = time() . "_" . $_FILES['images']['name'][$key];
+    move_uploaded_file($tmp, "../uploads/restaurants/$restaurant_id/$name");
+
+    mysqli_query($conn, "
+        INSERT INTO restaurant_images (restaurant_id, image)
+        VALUES ('$restaurant_id', '$name')
+    ");
+}
+
+
 if ($name === '') {
     die("Restaurant name required");
 }
 
 /* 1️⃣ INSERT RESTAURANT */
 $insertRestaurant = mysqli_query($conn, "
-    INSERT INTO restaurants (owner_id, name, description)
+    INSERT INTO `restaurants` (owner_id, name, description)
     VALUES ('$user_id', '$name', '$desc')
 ");
 
